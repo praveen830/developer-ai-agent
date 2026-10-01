@@ -5,46 +5,68 @@ STEP 7D: Gemini-Based MCP Tool Selection
 
 ARCHITECTURAL PRINCIPLE:
 ------------------------
-Gemini does NOT directly call the MCP server or external APIs.
-The Python application serves as the bridge:
+Gemini does NOT directly communicate with or execute tools on the MCP server.
+The Python Agent acts as the central bridge and orchestrator:
 
-       USER REQUEST
-            ↓
-          GEMINI
-            ↓
-   (Gemini evaluates request & tool schemas:
-    chooses 'get_learning_topics' OR 'search_wikipedia')
-            ↓
-       PYTHON AGENT  (Extracts & validates tool name & arguments)
-            ↓
-        MCP CLIENT   (Stdio transport / JSON-RPC handshake)
-            ↓
-        MCP SERVER   (Executes the selected tool)
-            ↓
-       TOOL RESULT
-            ↓
-       PYTHON AGENT  (Packages MCP result into conversation history)
-            ↓
-          GEMINI     (Synthesizes final answer with grounding data)
-            ↓
-      FINAL RESPONSE
+       User
+        ↓
+   Python Agent
+        ↓
+      Gemini
+        ↓
+   Gemini selects an MCP tool (JSON Function Call)
+        ↓
+   Python Agent validates tool name and arguments
+        ↓
+     MCP Client (Stdio transport / JSON-RPC protocol)
+        ↓
+     MCP Server (Hosts registered tools)
+        ↓
+   Selected MCP Tool (e.g. 'get_learning_topics' or 'search_wikipedia')
+        ↓
+    Tool Result (Structured data)
+        ↓
+   Python Agent (Packages tool output into conversation context)
+        ↓
+      Gemini (Synthesizes grounded final answer)
+        ↓
+    Final Response
 
-EDUCATIONAL OVERVIEW:
---------------------
-1. GEMINI TOOL DECLARATION:
-   We declare tool schemas to Gemini using standard JSON schemas. Gemini learns
-   what each tool does and what input parameters it accepts.
-2. GEMINI TOOL SELECTION:
-   When presented with the user request, Gemini's reasoning determines if a tool
-   is needed, and if so, which tool and what arguments to supply.
-3. MCP BRIDGE:
-   The Python agent intercepts Gemini's function call, acts as the client, and
-   forwards the call over stdio to the MCP Server.
-4. MCP TOOL EXECUTION:
-   The MCP Server executes the Python tool implementation and returns structured JSON.
-5. SENDING THE TOOL RESULT BACK TO GEMINI:
-   The tool result is sent back to Gemini in a function response turn so Gemini
-   can incorporate real-world grounded facts into its final answer.
+BEGINNER-FRIENDLY CONCEPTUAL OVERVIEW:
+--------------------------------------
+1. GEMINI TOOL DECLARATIONS:
+   We provide Gemini with JSON-compatible function signatures (schemas) describing:
+   - Tool 1: `get_learning_topics` (structured learning curriculum/roadmap)
+   - Tool 2: `search_wikipedia` (factual encyclopedic summaries)
+   These declarations teach Gemini what capabilities exist and what inputs they take.
+
+2. TOOL SCHEMA:
+   Each tool defines a `parameters` schema specifying data types and required fields
+   (e.g., `topic` as a STRING). Gemini uses this schema to generate structured arguments.
+
+3. GEMINI TOOL SELECTION:
+   When given a user prompt, Gemini's reasoning determines if an external tool is
+   needed. If needed, it outputs a function call containing the tool name and arguments.
+
+4. PYTHON AGENT ORCHESTRATION:
+   The Python Agent intercepts Gemini's decision, validates that the requested tool is
+   in the approved whitelist, and confirms the arguments are well-formed.
+
+5. MCP CLIENT CALL:
+   The Python Agent invokes the MCP Client over a standard I/O (stdio) transport pipe.
+   Gemini never has direct network or subprocess access.
+
+6. MCP SERVER EXECUTION:
+   The MCP Server receives the JSON-RPC tool call, runs the corresponding Python function,
+   and returns the output back across the stdio pipe to the MCP Client.
+
+7. RETURNING THE TOOL RESULT TO GEMINI:
+   The Python Agent wraps the tool output in a `function_response` message and appends
+   it to the conversation history, sending it back to Gemini.
+
+8. FINAL GEMINI RESPONSE:
+   Gemini reads the conversation history including the tool's returned data and
+   generates a clear, natural-language response grounded in the tool's findings.
 """
 
 import asyncio
@@ -59,7 +81,7 @@ from google.genai.errors import ClientError, ServerError
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-# Ensure clean UTF-8 console output on Windows
+# Ensure clean UTF-8 console output on Windows platforms
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -67,12 +89,12 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# Suppress verbose informational logs from the Google GenAI SDK
+# Suppress verbose informational logs from Google GenAI SDK
 logging.getLogger("google_genai").setLevel(logging.ERROR)
 
 
 # ---------------------------------------------------------------------------
-# 1. API Key Retrieval (Safe: reads environment without exposing or writing keys)
+# 1. API Key Retrieval (Safe: reads environment without exposing credentials)
 # ---------------------------------------------------------------------------
 def get_api_key() -> str | None:
     """Read GEMINI_API_KEY from environment or Windows User registry fallback."""
@@ -105,35 +127,38 @@ def get_api_key() -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# 2. Tool Declarations for Gemini
+# 2. Gemini Tool Declarations & Schemas
 # ---------------------------------------------------------------------------
-# Define the schemas for the two available MCP tools.
-# Gemini receives these definitions and decides which tool is appropriate.
+# GEMINI TOOL DECLARATIONS & TOOL SCHEMA:
+# We define function declarations that match the existing MCP tools.
+# Gemini uses these declarations to understand when and how to call each tool.
 tools_declaration = types.Tool(
     function_declarations=[
+        # Tool 1: get_learning_topics
         types.FunctionDeclaration(
             name="get_learning_topics",
-            description="Returns a structured list of important learning topics/roadmap for a given technical subject.",
+            description="Get a structured list of learning topics for a requested subject or technology.",
             parameters=types.Schema(
                 type="OBJECT",
                 properties={
                     "topic": types.Schema(
                         type="STRING",
-                        description="The technical subject, framework, or language to generate learning topics for (e.g. 'Spring Boot', 'Python').",
+                        description="The requested subject or technology.",
                     ),
                 },
                 required=["topic"],
             ),
         ),
+        # Tool 2: search_wikipedia
         types.FunctionDeclaration(
             name="search_wikipedia",
-            description="Search Wikipedia for an encyclopedic summary, definition, background, or history of a technology, concept, or person.",
+            description="Search Wikipedia for factual/reference information about a requested topic.",
             parameters=types.Schema(
                 type="OBJECT",
                 properties={
                     "topic": types.Schema(
                         type="STRING",
-                        description="The technical topic, language, tool, or subject to search on Wikipedia (e.g. 'Java', 'Python').",
+                        description="The requested topic.",
                     ),
                 },
                 required=["topic"],
@@ -142,19 +167,20 @@ tools_declaration = types.Tool(
     ]
 )
 
-SUPPORTED_TOOLS = ["get_learning_topics", "search_wikipedia"]
+# Strict whitelist of allowed tools to prevent unauthorized execution
+ALLOWED_TOOLS = ["get_learning_topics", "search_wikipedia"]
 
 
 # ---------------------------------------------------------------------------
 # 3. MCP Client Bridge: Communicates with MCP Server over stdio
 # ---------------------------------------------------------------------------
 async def execute_mcp_tool(tool_name: str, tool_args: dict[str, Any]) -> dict[str, Any]:
-    """Connects to the MCP server via the MCP Client, calls the tool, and returns result.
-
-    ARCHITECTURAL BRIDGE:
-    The Python Agent invokes this function. The MCP client spawns the MCP server
-    as a subprocess, manages JSON-RPC over stdio, and returns the result back to
-    the Python agent. Gemini has zero knowledge of or access to this connection.
+    """MCP CLIENT CALL & MCP SERVER EXECUTION:
+    Connects to the existing MCP server via the official MCP Client over stdio transport.
+    Spawns 'src/mcp_server/server.py' as a subprocess, initializes the JSON-RPC session,
+    calls the selected tool, and returns the parsed result.
+    
+    Gemini does NOT connect to the MCP Server directly.
     """
     server_params = StdioServerParameters(
         command=sys.executable,
@@ -167,7 +193,7 @@ async def execute_mcp_tool(tool_name: str, tool_args: dict[str, Any]) -> dict[st
             await session.initialize()
             result = await session.call_tool(tool_name, tool_args)
 
-            # Parse returned MCP content
+            # Parse returned MCP content parts
             for content in result.content:
                 if content.type == "text":
                     try:
@@ -182,25 +208,43 @@ async def execute_mcp_tool(tool_name: str, tool_args: dict[str, Any]) -> dict[st
 
 
 # ---------------------------------------------------------------------------
-# 4. Gemini Agent Orchestration Workflow
+# 4. Agent Orchestration: Gemini Tool Selection + MCP Bridge + Final Response
 # ---------------------------------------------------------------------------
 async def run_gemini_tool_agent(user_query: str) -> None:
-    """Executes the Gemini decision-making and MCP tool calling lifecycle."""
-    # Step A: Verify GEMINI_API_KEY exists before making any API call
+    """End-to-end workflow:
+    1. Validates API key configuration
+    2. Sends user query + tool declarations to Gemini
+    3. Evaluates Gemini's tool decision
+    4. Validates tool name and arguments in Python
+    5. Calls MCP Server through MCP Client
+    6. Returns tool result to Gemini
+    7. Displays Gemini's final natural-language response
+    """
+    # -----------------------------------------------------------------------
+    # Step A: Validate GEMINI_API_KEY
+    # -----------------------------------------------------------------------
     api_key = get_api_key()
     if not api_key:
-        print("Error: GEMINI_API_KEY environment variable not found.", file=sys.stderr)
+        print(
+            "CONFIGURATION ERROR: GEMINI_API_KEY environment variable is not set.\n"
+            "Please configure GEMINI_API_KEY in your environment or .env file.",
+            file=sys.stderr,
+        )
         return
 
     print("==================================================")
-    print("GEMINI + MCP TOOL SELECTION")
+    print("USER REQUEST")
     print("==================================================")
-    print(f"\nUSER REQUEST:\n{user_query}")
+    print(f"\n{user_query}")
+    sys.stdout.flush()
 
+    # Initialize Google GenAI client
     client = genai.Client(api_key=api_key)
-    model_name = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 
-    # Step B: Prepare conversation contents with user request
+    # -----------------------------------------------------------------------
+    # Step B: Prepare Conversation with User Prompt
+    # -----------------------------------------------------------------------
     contents = [
         types.Content(
             role="user",
@@ -208,7 +252,12 @@ async def run_gemini_tool_agent(user_query: str) -> None:
         )
     ]
 
-    # Step C: Send request to Gemini with both MCP tool declarations
+    # -----------------------------------------------------------------------
+    # Step C: Send User Request + Tool Declarations to Gemini
+    # -----------------------------------------------------------------------
+    # GEMINI TOOL SELECTION:
+    # Gemini analyzes the user query and the tool declarations.
+    # It decides whether to answer directly or request a tool invocation.
     try:
         response = client.models.generate_content(
             model=model_name,
@@ -220,15 +269,23 @@ async def run_gemini_tool_agent(user_query: str) -> None:
         )
     except ClientError as e:
         if e.code == 429 or "RESOURCE_EXHAUSTED" in str(e):
-            print(f"\nGEMINI API ERROR (429 Quota/Rate Limit):\nFree Tier limit reached. Please wait a moment before trying again.\nDetails: {e}", file=sys.stderr)
-        elif e.code == 404:
-            print(f"\nGEMINI API ERROR (404 Not Found):\nModel '{model_name}' was not found. Please verify GEMINI_MODEL setting.\nDetails: {e}", file=sys.stderr)
+            print(
+                f"\nGEMINI API ERROR (429 Quota/Rate Limit Exhausted):\n"
+                f"Gemini Free Tier quota reached. Please wait before retrying.\n"
+                f"Details: {e}",
+                file=sys.stderr,
+            )
         else:
             print(f"\nGEMINI API ERROR ({e.code}):\n{e}", file=sys.stderr)
         return
     except ServerError as e:
         if e.code == 503 or "UNAVAILABLE" in str(e):
-            print(f"\nGEMINI API ERROR (503 Service Unavailable):\nGemini API is temporarily overloaded or unavailable. Please try again shortly.\nDetails: {e}", file=sys.stderr)
+            print(
+                f"\nGEMINI API ERROR (503 Service Unavailable):\n"
+                f"Gemini service is temporarily unavailable. Please try again shortly.\n"
+                f"Details: {e}",
+                file=sys.stderr,
+            )
         else:
             print(f"\nGEMINI API SERVER ERROR ({e.code}):\n{e}", file=sys.stderr)
         return
@@ -236,22 +293,24 @@ async def run_gemini_tool_agent(user_query: str) -> None:
         print(f"\nGEMINI API UNEXPECTED ERROR:\n{e}", file=sys.stderr)
         return
 
-    # Step D: Inspect Gemini's tool decision
-    print("\n--------------------------------------------------")
+    # -----------------------------------------------------------------------
+    # Step D: Inspect Gemini's Tool Decision
+    # -----------------------------------------------------------------------
+    print("\n==================================================")
     print("GEMINI TOOL DECISION")
-    print("--------------------------------------------------")
+    print("==================================================")
 
-    # Case 1: Gemini decides no tool is needed -> answers directly
+    # Case A: Gemini did not request any tool -> answers directly
     if not response.function_calls:
         print("\nGEMINI DID NOT REQUEST AN MCP TOOL")
-        print("\n--------------------------------------------------")
+        print("\n==================================================")
         print("GEMINI FINAL RESPONSE")
-        print("--------------------------------------------------")
+        print("==================================================")
         final_answer = response.text.strip() if response.text else "No response generated."
         print(f"\n{final_answer}")
         return
 
-    # Case 2: Gemini selects one of the MCP tools
+    # Case B: Gemini requested a tool call
     call = response.function_calls[0]
     tool_name = call.name
     tool_args = call.args or {}
@@ -259,39 +318,54 @@ async def run_gemini_tool_agent(user_query: str) -> None:
     print(f"\nSELECTED TOOL:\n{tool_name}")
     print(f"\nARGUMENTS:\n{json.dumps(tool_args, indent=2)}")
 
-    # Validate tool name
-    if tool_name not in SUPPORTED_TOOLS:
-        print(f"\nError: Unsupported tool '{tool_name}' requested by Gemini.", file=sys.stderr)
+    # -----------------------------------------------------------------------
+    # Step E: Python Agent Orchestration & Validation
+    # -----------------------------------------------------------------------
+    # Validate tool name against whitelist
+    if tool_name not in ALLOWED_TOOLS:
+        print(
+            f"\nError: Unknown tool '{tool_name}' selected by Gemini. "
+            f"Allowed tools: {ALLOWED_TOOLS}. Execution aborted.",
+            file=sys.stderr,
+        )
         return
 
-    # Validate arguments safely
+    # Validate arguments structure
     if (
         not isinstance(tool_args, dict)
         or "topic" not in tool_args
         or not isinstance(tool_args["topic"], str)
         or not tool_args["topic"].strip()
     ):
-        print(f"\nError: Malformed tool arguments received from Gemini: {tool_args}", file=sys.stderr)
+        print(
+            f"\nError: Malformed arguments received from Gemini for tool '{tool_name}': {tool_args}",
+            file=sys.stderr,
+        )
         return
 
-    # Step E: Python Agent bridges call to MCP Client -> MCP Server
-    print("\n--------------------------------------------------")
-    print("MCP TOOL EXECUTION")
-    print("--------------------------------------------------")
-    print(f"\nTOOL:\n{tool_name}")
-
+    # -----------------------------------------------------------------------
+    # Step F: Execute Tool via MCP Client (Calling MCP Server)
+    # -----------------------------------------------------------------------
     try:
         tool_result = await execute_mcp_tool(tool_name, tool_args)
     except Exception as e:
-        print(f"\nMCP TOOL ERROR:\nFailed to execute tool on MCP server: {e}", file=sys.stderr)
+        print(f"\nMCP TOOL EXECUTION ERROR:\nFailed to execute tool on MCP server: {e}", file=sys.stderr)
         return
 
-    print(f"\nRESULT:\n{json.dumps(tool_result, indent=2)}")
+    # Print MCP Tool Result
+    print("\n==================================================")
+    print("MCP TOOL RESULT")
+    print("==================================================")
+    print(f"\n{json.dumps(tool_result, indent=2)}")
 
-    # Step F: Pass the MCP tool result back to Gemini to produce final response
+    # -----------------------------------------------------------------------
+    # Step G: Return Tool Result to Gemini
+    # -----------------------------------------------------------------------
+    # Append Gemini's previous turn (assistant function call)
     if response.candidates and response.candidates[0].content:
         contents.append(response.candidates[0].content)
 
+    # Append the tool's execution result as a function response
     contents.append(
         types.Content(
             role="user",
@@ -304,10 +378,12 @@ async def run_gemini_tool_agent(user_query: str) -> None:
         )
     )
 
-    print("\n--------------------------------------------------")
-    print("GEMINI FINAL RESPONSE")
-    print("--------------------------------------------------")
-
+    # -----------------------------------------------------------------------
+    # Step H: Final Gemini Synthesis
+    # -----------------------------------------------------------------------
+    # FINAL GEMINI RESPONSE:
+    # Gemini receives the factual tool output and generates a comprehensive,
+    # natural-language response for the user.
     try:
         final_response = client.models.generate_content(
             model=model_name,
@@ -318,19 +394,32 @@ async def run_gemini_tool_agent(user_query: str) -> None:
             if final_response and final_response.text
             else "No response generated."
         )
+        print("\n==================================================")
+        print("GEMINI FINAL RESPONSE")
+        print("==================================================")
         print(f"\n{final_text}")
     except ClientError as e:
         if e.code == 429 or "RESOURCE_EXHAUSTED" in str(e):
-            print(f"\nGEMINI API ERROR (429 Quota/Rate Limit):\nFree Tier limit reached. Unable to generate final response.\nDetails: {e}", file=sys.stderr)
+            print(
+                f"\nGEMINI API ERROR (429 Quota/Rate Limit Exhausted):\n"
+                f"Free Tier limit reached. Unable to generate final response.\n"
+                f"Details: {e}",
+                file=sys.stderr,
+            )
         else:
             print(f"\nGEMINI API ERROR ({e.code}):\n{e}", file=sys.stderr)
     except ServerError as e:
         if e.code == 503 or "UNAVAILABLE" in str(e):
-            print(f"\nGEMINI API ERROR (503 Service Unavailable):\nGemini API is temporarily unavailable for final synthesis.\nDetails: {e}", file=sys.stderr)
+            print(
+                f"\nGEMINI API ERROR (503 Service Unavailable):\n"
+                f"Gemini service is temporarily unavailable for final synthesis.\n"
+                f"Details: {e}",
+                file=sys.stderr,
+            )
         else:
             print(f"\nGEMINI API SERVER ERROR ({e.code}):\n{e}", file=sys.stderr)
     except Exception as e:
-        print(f"\nGEMINI API UNEXPECTED ERROR:\nFailed to generate final response from tool result: {e}", file=sys.stderr)
+        print(f"\nGEMINI API UNEXPECTED ERROR:\nFailed to generate final response: {e}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------

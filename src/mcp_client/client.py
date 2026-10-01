@@ -15,6 +15,13 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+# Load environment variables (.env) if python-dotenv is present
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Ensure clean UTF-8 console output on Windows
 if sys.platform == "win32":
     try:
@@ -39,10 +46,10 @@ def format_mcp_result(call_result: Any) -> str:
     return "\n".join(formatted_parts) if formatted_parts else "{}"
 
 
-async def run_mcp_client() -> None:
-    """Connects to the MCP server, queries available tools, and invokes both tools."""
+async def run_mcp_client(profile_only: bool = False) -> None:
+    """Connects to the MCP server, queries available tools, and invokes tools over stdio."""
     print("==================================================")
-    print("MCP CLIENT - MULTIPLE TOOLS")
+    print("MCP CLIENT - TOOL EXECUTION TEST")
     print("==================================================")
 
     # 1. StdioServerParameters defines how to spawn the MCP server subprocess
@@ -68,39 +75,57 @@ async def run_mcp_client() -> None:
             for name in tool_names:
                 print(f"- {name}")
 
+            if not profile_only:
+                # -------------------------------------------------------------------
+                # Tool 1: get_learning_topics
+                # -------------------------------------------------------------------
+                tool1_name = "get_learning_topics"
+                tool1_args = {"topic": "Spring Boot"}
+
+                print(f"\n--------------------------------------------------")
+                print(f"TOOL 1: {tool1_name}")
+                print(f"--------------------------------------------------")
+                print(f"\nARGUMENTS:\n{json.dumps(tool1_args, indent=2)}")
+
+                if tool1_name in tool_names:
+                    call_result1 = await session.call_tool(tool1_name, tool1_args)
+                    print(f"\nRESULT:\n{format_mcp_result(call_result1)}")
+                else:
+                    print(f"\nError: Tool '{tool1_name}' not found on MCP server!", file=sys.stderr)
+
+                # -------------------------------------------------------------------
+                # Tool 2: search_wikipedia
+                # -------------------------------------------------------------------
+                tool2_name = "search_wikipedia"
+                tool2_args = {"topic": "Java"}
+
+                print(f"\n--------------------------------------------------")
+                print(f"TOOL 2: {tool2_name}")
+                print(f"--------------------------------------------------")
+                print(f"\nARGUMENTS:\n{json.dumps(tool2_args, indent=2)}")
+
+                if tool2_name in tool_names:
+                    call_result2 = await session.call_tool(tool2_name, tool2_args)
+                    print(f"\nRESULT:\n{format_mcp_result(call_result2)}")
+                else:
+                    print(f"\nError: Tool '{tool2_name}' not found on MCP server!", file=sys.stderr)
+
             # -------------------------------------------------------------------
-            # Tool 1: get_learning_topics
+            # Tool 3: get_student_profile (Spring Boot authenticated API call)
             # -------------------------------------------------------------------
-            tool1_name = "get_learning_topics"
-            tool1_args = {"topic": "Spring Boot"}
+            tool3_name = "get_student_profile"
+            tool3_args: dict[str, Any] = {}
 
             print(f"\n--------------------------------------------------")
-            print(f"TOOL 1: {tool1_name}")
+            print(f"TOOL 3: {tool3_name}")
             print(f"--------------------------------------------------")
-            print(f"\nARGUMENTS:\n{json.dumps(tool1_args, indent=2)}")
+            print(f"\nARGUMENTS:\n{json.dumps(tool3_args, indent=2)}")
 
-            if tool1_name in tool_names:
-                call_result1 = await session.call_tool(tool1_name, tool1_args)
-                print(f"\nRESULT:\n{format_mcp_result(call_result1)}")
+            if tool3_name in tool_names:
+                call_result3 = await session.call_tool(tool3_name, tool3_args)
+                print(f"\nRESULT:\n{format_mcp_result(call_result3)}")
             else:
-                print(f"\nError: Tool '{tool1_name}' not found on MCP server!", file=sys.stderr)
-
-            # -------------------------------------------------------------------
-            # Tool 2: search_wikipedia
-            # -------------------------------------------------------------------
-            tool2_name = "search_wikipedia"
-            tool2_args = {"topic": "Java"}
-
-            print(f"\n--------------------------------------------------")
-            print(f"TOOL 2: {tool2_name}")
-            print(f"--------------------------------------------------")
-            print(f"\nARGUMENTS:\n{json.dumps(tool2_args, indent=2)}")
-
-            if tool2_name in tool_names:
-                call_result2 = await session.call_tool(tool2_name, tool2_args)
-                print(f"\nRESULT:\n{format_mcp_result(call_result2)}")
-            else:
-                print(f"\nError: Tool '{tool2_name}' not found on MCP server!", file=sys.stderr)
+                print(f"\nError: Tool '{tool3_name}' not found on MCP server!", file=sys.stderr)
 
             print("\n==================================================")
             print("TEST COMPLETE")
@@ -108,4 +133,6 @@ async def run_mcp_client() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(run_mcp_client())
+    profile_mode = "--profile-only" in sys.argv
+    asyncio.run(run_mcp_client(profile_only=profile_mode))
+
